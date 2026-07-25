@@ -37,5 +37,6 @@ target_link_libraries(server PRIVATE
     zstd
     brotlienc
     brotlidec
+    m
 )
 
