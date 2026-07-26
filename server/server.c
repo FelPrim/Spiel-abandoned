@@ -38,19 +38,52 @@
 #ifndef H2O_USE_LIBUV
 #define H2O_USE_LIBUV 0
 #endif
-#define USE_HTTP3 (H2O_USE_HTTP3 && !H2O_USE_LIBUV)
-#if USE_HTTP3
+
+// HTTP3 stuff
 #include "h2o/http3_server.h"
 #include "h2o/http3_common.h"
 #include "picotls.h"
 #include "picotls/openssl.h"
 #include "quicly.h"
 #include "quicly/defaults.h"
-#endif
+////
 
 #define USE_HTTPS 1
 #define USE_MEMCACHED 0
-#define HTTP3_PORT 7891
+
+// LOCAL = true <=> local development
+#ifndef LOCAL
+#define LOCAL 0
+#endif
+
+#if LOCAL
+    // march=native
+    #define DOMAIN 0x7f000001
+    #define DOMAIN_STR "127.0.0.1"
+    #define HTTP_PORT 23230
+    #define HTTP_PORT_STR "23230"
+    #define HTTPS_PORT 23231
+    #define HTTPS_PORT_STR "23231"
+    #define HTTP3_PORT 23232
+    #define HTTP3_PORT_STR "23232"
+
+    // TODO change certs for local dev
+    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/fullchain.pem"
+    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/privkey.pem"
+#else
+    // march=haswell
+    #define DOMAIN INADDR_ANY
+    #define DOMAIN_STR "0.0.0.0"
+    #define HTTP_PORT 80
+    #define HTTP_PORT_STR "80"
+    #define HTTPS_PORT 443
+    #define HTTPS_PORT_STR "443"
+    #define HTTP3_PORT 443
+    #define HTTP3_PORT_STR "443"
+
+    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/fullchain.pem"
+    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/privkey.pem"
+#endif
 
 static h2o_pathconf_t* register_handler(h2o_hostconf_t* hostconf, const char* path, int (*on_req)(h2o_handler_t*, h2o_req_t*))
 {
@@ -60,14 +93,35 @@ static h2o_pathconf_t* register_handler(h2o_hostconf_t* hostconf, const char* pa
     return pathconf;
 }
 
-
+// sends index.html
+// isn't using a default file handler because of the need of Alt-Svc
 static int index_handler(h2o_handler_t* self, h2o_req_t* req)
 {
-    static h2o_generator_t generator = { NULL, NULL };
-
+    // TODO what is memis?
     if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
         return -1;
 
+    // Achtung! This code wasn't verified. Can {not work}
+    /* If the incoming request is not HTTPS, redirect to HTTPS */
+    if (req->scheme != &H2O_URL_SCHEME_HTTPS) {
+        h2o_url_t url;
+        /* use authority (host[:port]) and original path */
+        if (h2o_url_init_with_hostport(&url, &req->pool, &H2O_URL_SCHEME_HTTPS, req->authority, HTTPS_PORT, req->path) != 0) {
+            return -1;
+        }
+        h2o_iovec_t dest = h2o_url_stringify(&req->pool, &url);
+
+        req->res.status = 301;
+        req->res.reason = "Moved Permanently";
+        h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_LOCATION, NULL, dest.base, dest.len);
+        h2o_send_inline(req, H2O_STRLIT("")); /* empty body */
+        return 0;
+    }
+
+    static h2o_generator_t generator = { NULL, NULL };
+
+    // TODO does this causes memory allocation for every call?
+    // TODO add support for loading string from file
     h2o_iovec_t body = h2o_strdup(&req->pool,
         "<!doctype html>\n<html><head><meta charset=\"utf-8\"></head>\n"
         "<body><h1>Hello world</h1></body></html>\n",
@@ -76,20 +130,22 @@ static int index_handler(h2o_handler_t* self, h2o_req_t* req)
     req->res.status = 200;
     req->res.reason = "OK";
 
+    // Can I add 2 headers in 1 call?
+    // Dunno what this header does
     h2o_add_header(
-        &req->pool, 
+        &req->pool, // can I do something interesting with this pool?
         &req->res.headers,
         H2O_TOKEN_CONTENT_TYPE, 
         NULL,
         H2O_STRLIT("text/html; charset=utf-8")
     );
-
+    // Alt-Svc header
     h2o_add_header(
         &req->pool,
         &req->res.headers,
         H2O_TOKEN_ALT_SVC,               
         NULL,                            
-        H2O_STRLIT("h3=\":7891\"; ma=3600")
+        H2O_STRLIT("h3=\":" HTTP3_PORT_STR "\"; ma=3600")
     );
 
     h2o_start_response(req, &generator);
@@ -97,113 +153,35 @@ static int index_handler(h2o_handler_t* self, h2o_req_t* req)
     return 0;
 }
 
-//static int chunked_test(h2o_handler_t* self, h2o_req_t* req)
-//{
-//    static h2o_generator_t generator = { NULL, NULL };
-//
-//    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
-//        return -1;
-//
-//    h2o_iovec_t body = h2o_strdup(&req->pool, "hello world\n", SIZE_MAX);
-//    req->res.status = 200;
-//    req->res.reason = "OK";
-//    h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain"));
-//    h2o_start_response(req, &generator);
-//    h2o_send(req, &body, 1, 1);
-//
-//    return 0;
-//}
-//
-//static int reproxy_test(h2o_handler_t* self, h2o_req_t* req)
-//{
-//    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
-//        return -1;
-//
-//    req->res.status = 200;
-//    req->res.reason = "OK";
-//    h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_X_REPROXY_URL, NULL, H2O_STRLIT("http://www.ietf.org/"));
-//    h2o_send_inline(req, H2O_STRLIT("you should never see this!\n"));
-//
-//    return 0;
-//}
-//
-//static int post_test(h2o_handler_t* self, h2o_req_t* req)
-//{
-//    if (h2o_memis(req->method.base, req->method.len, H2O_STRLIT("POST")) &&
-//        h2o_memis(req->path_normalized.base, req->path_normalized.len, H2O_STRLIT("/post-test/"))) {
-//        static h2o_generator_t generator = { NULL, NULL };
-//        req->res.status = 200;
-//        req->res.reason = "OK";
-//        h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_CONTENT_TYPE, NULL, H2O_STRLIT("text/plain; charset=utf-8"));
-//        h2o_start_response(req, &generator);
-//        h2o_send(req, &req->entity, 1, 1);
-//        return 0;
-//    }
-//
-//    return -1;
-//}
-
 static h2o_globalconf_t config;
 static h2o_context_t ctx;
 static h2o_multithread_receiver_t libmemcached_receiver;
 static h2o_accept_ctx_t accept_ctx;
+static h2o_accept_ctx_t accept_ctx_plain;
 
-#if USE_HTTP3
 static h2o_http3_server_ctx_t http3_ctx;
 static quicly_context_t quic_ctx;
 static ptls_context_t ptls_ctx;
 static ptls_openssl_sign_certificate_t sign_certificate;
 static quicly_cid_plaintext_t next_cid;
 static h2o_accept_ctx_t http3_accept_ctx;
-#endif
 
-#if H2O_USE_LIBUV
-
-static void on_accept(uv_stream_t* listener, int status)
+// accept http
+static void on_accept_plain(h2o_socket_t* listener, const char* err)
 {
-    uv_tcp_t* conn;
+    // I could've refactored this to a purer function and not just copypaste of on_accept, but I am too lazy and this works good enough
     h2o_socket_t* sock;
 
-    if (status != 0)
-        return;
-
-    conn = h2o_mem_alloc(sizeof(*conn));
-    uv_tcp_init(listener->loop, conn);
-
-    if (uv_accept(listener, (uv_stream_t*)conn) != 0) {
-        uv_close((uv_handle_t*)conn, (uv_close_cb)free);
+    if (err != NULL) {
         return;
     }
 
-    sock = h2o_uv_socket_create((uv_handle_t*)conn, (uv_close_cb)free);
-    h2o_accept(&accept_ctx, sock);
+    if ((sock = h2o_evloop_socket_accept(listener)) == NULL)
+        return;
+    h2o_accept(&accept_ctx_plain, sock);
 }
 
-static int create_listener(void)
-{
-    static uv_tcp_t listener;
-    struct sockaddr_in addr;
-    int r;
-
-    uv_tcp_init(ctx.loop, &listener);
-    uv_ip4_addr("127.0.0.1", 7890, &addr);
-    if ((r = uv_tcp_bind(&listener, (struct sockaddr*)&addr, 0)) != 0) {
-        fprintf(stderr, "uv_tcp_bind:%s\n", uv_strerror(r));
-        goto Error;
-    }
-    if ((r = uv_listen((uv_stream_t*)&listener, 128, on_accept)) != 0) {
-        fprintf(stderr, "uv_listen:%s\n", uv_strerror(r));
-        goto Error;
-    }
-
-    return 0;
-Error:
-    uv_close((uv_handle_t*)&listener, NULL);
-    return r;
-}
-
-#else
-
+// accept https
 static void on_accept(h2o_socket_t* listener, const char* err)
 {
     h2o_socket_t* sock;
@@ -217,6 +195,31 @@ static void on_accept(h2o_socket_t* listener, const char* err)
     h2o_accept(&accept_ctx, sock);
 }
 
+// copypaste of create_listener, but for http instead of https
+static int create_plain_listener(void)
+{
+    struct sockaddr_in addr;
+    int fd, reuseaddr_flag = 1;
+    h2o_socket_t* sock;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(DOMAIN);
+    addr.sin_port = htons(HTTP_PORT);
+
+    if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1 ||
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag, sizeof(reuseaddr_flag)) != 0 ||
+        bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0 || listen(fd, SOMAXCONN) != 0) {
+		// maybe I shouldn't return -1 when something goes wrong??? what about proper error handling?
+        return -1;
+    }
+
+    sock = h2o_evloop_socket_create(ctx.loop, fd, H2O_SOCKET_FLAG_DONT_READ);
+    h2o_socket_read_start(sock, on_accept_plain);
+
+    return 0;
+}
+
 static int create_listener(void)
 {
     struct sockaddr_in addr;
@@ -225,8 +228,8 @@ static int create_listener(void)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(0x7f000001);
-    addr.sin_port = htons(7890);
+    addr.sin_addr.s_addr = htonl(DOMAIN);
+    addr.sin_port = htons(HTTPS_PORT);
 
     if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1 ||
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag, sizeof(reuseaddr_flag)) != 0 ||
@@ -240,9 +243,8 @@ static int create_listener(void)
     return 0;
 }
 
-#endif
-
-#if USE_HTTP3
+// HTTP3 stuff
+// ig, cb stands for callback
 static int on_client_hello_cb(ptls_on_client_hello_t* self, ptls_t* tls, ptls_on_client_hello_parameters_t* params)
 {
     if (params->incompatible_version)
@@ -266,7 +268,7 @@ static int on_client_hello_cb(ptls_on_client_hello_t* self, ptls_t* tls, ptls_on
     return 0;
 }
 
-static ptls_on_client_hello_t on_client_hello = { on_client_hello_cb };
+static ptls_on_client_hello_t on_client_hello = { on_client_hello_cb }; // funny syntax
 
 static int setup_ptls_context(const char* cert_file, const char* key_file)
 {
@@ -344,7 +346,7 @@ static int create_udp_listener(h2o_socket_t** sock_out)
 
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(0x7f000001);
+    addr.sin_addr.s_addr = htonl(DOMAIN);
     addr.sin_port = htons(HTTP3_PORT);
 
     if ((fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) == -1) {
@@ -358,6 +360,7 @@ static int create_udp_listener(h2o_socket_t** sock_out)
         return -1;
     }
 
+    // what is IP_PKTINFO?
 #if defined(IP_PKTINFO)
     if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
         perror("setsockopt(IP_PKTINFO)");
@@ -386,8 +389,8 @@ static int create_udp_listener(h2o_socket_t** sock_out)
     return 0;
 }
 
-static h2o_quic_conn_t* on_http3_accept(h2o_quic_ctx_t* quic_ctx, quicly_address_t* destaddr, quicly_address_t* srcaddr,
-    quicly_decoded_packet_t* packet)
+static h2o_quic_conn_t* on_http3_accept(
+    h2o_quic_ctx_t* quic_ctx, quicly_address_t* destaddr, quicly_address_t* srcaddr, quicly_decoded_packet_t* packet)
 {
     h2o_http3_server_ctx_t* h3ctx = H2O_STRUCT_FROM_MEMBER(h2o_http3_server_ctx_t, super, quic_ctx);
 
@@ -405,21 +408,29 @@ static h2o_quic_conn_t* on_http3_accept(h2o_quic_ctx_t* quic_ctx, quicly_address
 
     return &conn->super;
 }
-#endif
 
 static int setup_ssl(const char* cert_file, const char* key_file, const char* ciphers)
 {
     SSL_load_error_strings();
     SSL_library_init();
     OpenSSL_add_all_algorithms();
-
+                                    // 23 mentioned!
     accept_ctx.ssl_ctx = SSL_CTX_new(SSLv23_server_method());
     SSL_CTX_set_options(accept_ctx.ssl_ctx, SSL_OP_NO_SSLv2);
 
+    // why this isn't checked via preprocessor? Is there a good reason to not do so?
     if (USE_MEMCACHED) {
         accept_ctx.libmemcached_receiver = &libmemcached_receiver;
-        h2o_accept_setup_memcached_ssl_resumption(h2o_memcached_create_context("127.0.0.1", 11211, 0, 1, "h2o:ssl-resumption:"),
-            86400);
+        h2o_accept_setup_memcached_ssl_resumption(
+            h2o_memcached_create_context(
+                DOMAIN_STR, // maybe this should allways be localhost???
+                11211, // port
+                0,     // text_protocol
+                1,     // num_threads (so, 1 thread...)
+                "h2o:ssl-resumption:" // prefix
+            ),       
+            86400 // expiration, possible 1 day
+        );
         h2o_socket_ssl_async_resumption_setup_ctx(accept_ctx.ssl_ctx);
     }
 
@@ -500,7 +511,7 @@ int main(int argc, char** argv)
     if (USE_MEMCACHED)
         h2o_multithread_register_receiver(ctx.queue, &libmemcached_receiver, h2o_memcached_receiver);
 
-    if (USE_HTTPS && setup_ssl("/mnt/t/GitHub/Spiel/misc/certificate.crt", "/mnt/t/GitHub/Spiel/misc/private.key",
+    if (USE_HTTPS && setup_ssl(CERTIFICATE_FILEPATH, PRIVATE_KEY_FILEPATH,
         "DEFAULT:!MD5:!DSS:!DES:!RC4:!RC2:!SEED:!IDEA:!NULL:!ADH:!EXP:!SRP:!PSK") != 0)
         goto Error;
 
@@ -508,13 +519,12 @@ int main(int argc, char** argv)
     accept_ctx.hosts = config.hosts;
 
     if (create_listener() != 0) {
-        fprintf(stderr, "failed to listen to 127.0.0.1:7890:%s\n", strerror(errno));
+        fprintf(stderr, "failed to listen to " DOMAIN_STR ":" HTTPS_PORT_STR ":%s\n", strerror(errno));
         goto Error;
     }
-    printf("HTTP/1 and HTTP/2 listening on https://127.0.0.1:7890 (TCP)\n");
+    printf("HTTP/1 and HTTP/2 listening on https://" DOMAIN_STR ":" HTTPS_PORT_STR " (TCP)\n");
 
-#if USE_HTTP3 && !H2O_USE_LIBUV
-    if (setup_ptls_context("/mnt/t/GitHub/Spiel/misc/certificate.crt", "/mnt/t/GitHub/Spiel/misc/private.key") != 0)
+    if (setup_ptls_context(CERTIFICATE_FILEPATH, PRIVATE_KEY_FILEPATH) != 0)
         goto Error;
 
     if (setup_quic_context() != 0)
@@ -522,7 +532,7 @@ int main(int argc, char** argv)
 
     h2o_socket_t* udp_sock;
     if (create_udp_listener(&udp_sock) != 0) {
-        fprintf(stderr, "failed to create UDP listener on 127.0.0.1:%d\n", HTTP3_PORT);
+        fprintf(stderr, "failed to create UDP listener on " DOMAIN_STR ":" HTTP3_PORT_STR "\n");
         goto Error;
     }
 
@@ -530,28 +540,24 @@ int main(int argc, char** argv)
     http3_accept_ctx.hosts = config.hosts;
 
     h2o_http3_server_init_context(
-        &ctx, 
-        &http3_ctx.super, 
+        &ctx, // "this" for h2o "object". C moment
+        &http3_ctx.super, // why is it called super? Did h2o implement an inheritance???
         ctx.loop, 
         udp_sock,
-        NULL,
+        (h2o_socket_t*) NULL, // sock_alt_family
         &quic_ctx, 
         &next_cid, 
         on_http3_accept, 
-        NULL,
-        config.http3.use_gso
+        (h2o_quic_notify_connection_update_cb) NULL,
+        config.http3.use_gso // what is gso? Using regardless
     );
     http3_ctx.accept_ctx = &http3_accept_ctx;
 
-    printf("HTTP/3 listening on https://127.0.0.1:%d (UDP/QUIC)\n", HTTP3_PORT);
-#endif
+    printf("HTTP/3 listening on https://" DOMAIN_STR ":" HTTP3_PORT_STR " (UDP/QUIC)\n");
 
-#if H2O_USE_LIBUV
-    uv_run(ctx.loop, UV_RUN_DEFAULT);
-#else
-    while (h2o_evloop_run(ctx.loop, INT32_MAX) == 0)
+
+    while (h2o_evloop_run(ctx.loop, INT32_MAX) == 0) // does this count ints and after INT_MAX it stops?
         ;
-#endif
 
 Error:
     return 1;

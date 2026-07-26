@@ -2,6 +2,8 @@
 */build/
 out/
 include/
+include_server/
+build_deps_server.sh
 
 *.so
 *.o
