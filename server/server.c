@@ -31,7 +31,7 @@
 #include "h2o.h"
 #include "h2o/http1.h"
 #include "h2o/http2.h"
-#include "h2o/memcached.h"
+//#include "h2o/memcached.h"
 #ifndef H2O_USE_HTTP3
 #define H2O_USE_HTTP3 1
 #endif
@@ -46,7 +46,12 @@
 #include "picotls/openssl.h"
 #include "quicly.h"
 #include "quicly/defaults.h"
-////
+///
+
+// Stuff used by me
+#include <assert.h>
+///
+
 
 #define USE_HTTPS 1
 #define USE_MEMCACHED 0
@@ -68,8 +73,8 @@
     #define HTTP3_PORT_STR "23232"
 
     // TODO change certs for local dev
-    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/fullchain.pem"
-    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/privkey.pem"
+    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabdance.com/fullchain.pem"
+    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabdance.com/privkey.pem"
 #else
     // march=haswell
     #define DOMAIN INADDR_ANY
@@ -81,8 +86,8 @@
     #define HTTP3_PORT 443
     #define HTTP3_PORT_STR "443"
 
-    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/fullchain.pem"
-    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabsdance.com/privkey.pem"
+    #define CERTIFICATE_FILEPATH "/etc/letsencrypt/live/spiel.crabdance.com/fullchain.pem"
+    #define PRIVATE_KEY_FILEPATH "/etc/letsencrypt/live/spiel.crabdance.com/privkey.pem"
 #endif
 
 static h2o_pathconf_t* register_handler(h2o_hostconf_t* hostconf, const char* path, int (*on_req)(h2o_handler_t*, h2o_req_t*))
@@ -93,69 +98,22 @@ static h2o_pathconf_t* register_handler(h2o_hostconf_t* hostconf, const char* pa
     return pathconf;
 }
 
-// sends index.html
-// isn't using a default file handler because of the need of Alt-Svc
-static int index_handler(h2o_handler_t* self, h2o_req_t* req)
+// // sends index.html
+// // isn't using a default file handler because of the need of Alt-Svc
+static int add_alt_svc_handler(h2o_handler_t* self, h2o_req_t* req)
 {
-    // TODO what is memis?
-    if (!h2o_memis(req->method.base, req->method.len, H2O_STRLIT("GET")))
-        return -1;
-
-    // Achtung! This code wasn't verified. Can {not work}
-    /* If the incoming request is not HTTPS, redirect to HTTPS */
-    if (req->scheme != &H2O_URL_SCHEME_HTTPS) {
-        h2o_url_t url;
-        /* use authority (host[:port]) and original path */
-        if (h2o_url_init_with_hostport(&url, &req->pool, &H2O_URL_SCHEME_HTTPS, req->authority, HTTPS_PORT, req->path) != 0) {
-            return -1;
-        }
-        h2o_iovec_t dest = h2o_url_stringify(&req->pool, &url);
-
-        req->res.status = 301;
-        req->res.reason = "Moved Permanently";
-        h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_LOCATION, NULL, dest.base, dest.len);
-        h2o_send_inline(req, H2O_STRLIT("")); /* empty body */
-        return 0;
+    /* only advertise HTTP/3 for TLS (HTTPS) requests */
+    if (req->scheme == &H2O_URL_SCHEME_HTTPS) {
+        h2o_add_header(&req->pool, &req->res.headers, H2O_TOKEN_ALT_SVC, NULL,
+            H2O_STRLIT("h3=\":" HTTP3_PORT_STR "\"; ma=3600"));
     }
-
-    static h2o_generator_t generator = { NULL, NULL };
-
-    // TODO does this causes memory allocation for every call?
-    // TODO add support for loading string from file
-    h2o_iovec_t body = h2o_strdup(&req->pool,
-        "<!doctype html>\n<html><head><meta charset=\"utf-8\"></head>\n"
-        "<body><h1>Hello world</h1></body></html>\n",
-        SIZE_MAX);
-
-    req->res.status = 200;
-    req->res.reason = "OK";
-
-    // Can I add 2 headers in 1 call?
-    // Dunno what this header does
-    h2o_add_header(
-        &req->pool, // can I do something interesting with this pool?
-        &req->res.headers,
-        H2O_TOKEN_CONTENT_TYPE, 
-        NULL,
-        H2O_STRLIT("text/html; charset=utf-8")
-    );
-    // Alt-Svc header
-    h2o_add_header(
-        &req->pool,
-        &req->res.headers,
-        H2O_TOKEN_ALT_SVC,               
-        NULL,                            
-        H2O_STRLIT("h3=\":" HTTP3_PORT_STR "\"; ma=3600")
-    );
-
-    h2o_start_response(req, &generator);
-    h2o_send(req, &body, 1, 1);
-    return 0;
+    /* return -1 so the next handler (the file handler) can still handle the request */
+    return -1;
 }
 
 static h2o_globalconf_t config;
 static h2o_context_t ctx;
-static h2o_multithread_receiver_t libmemcached_receiver;
+//static h2o_multithread_receiver_t libmemcached_receiver;
 static h2o_accept_ctx_t accept_ctx;
 static h2o_accept_ctx_t accept_ctx_plain;
 
@@ -210,7 +168,6 @@ static int create_plain_listener(void)
     if ((fd = socket(AF_INET, SOCK_STREAM, 0)) == -1 ||
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuseaddr_flag, sizeof(reuseaddr_flag)) != 0 ||
         bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0 || listen(fd, SOMAXCONN) != 0) {
-		// maybe I shouldn't return -1 when something goes wrong??? what about proper error handling?
         return -1;
     }
 
@@ -360,7 +317,6 @@ static int create_udp_listener(h2o_socket_t** sock_out)
         return -1;
     }
 
-    // what is IP_PKTINFO?
 #if defined(IP_PKTINFO)
     if (setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &optval, sizeof(optval)) != 0) {
         perror("setsockopt(IP_PKTINFO)");
@@ -409,6 +365,8 @@ static h2o_quic_conn_t* on_http3_accept(
     return &conn->super;
 }
 
+/// end of HTTP3 stuff
+
 static int setup_ssl(const char* cert_file, const char* key_file, const char* ciphers)
 {
     SSL_load_error_strings();
@@ -418,21 +376,21 @@ static int setup_ssl(const char* cert_file, const char* key_file, const char* ci
     accept_ctx.ssl_ctx = SSL_CTX_new(SSLv23_server_method());
     SSL_CTX_set_options(accept_ctx.ssl_ctx, SSL_OP_NO_SSLv2);
 
-    // why this isn't checked via preprocessor? Is there a good reason to not do so?
-    if (USE_MEMCACHED) {
-        accept_ctx.libmemcached_receiver = &libmemcached_receiver;
-        h2o_accept_setup_memcached_ssl_resumption(
-            h2o_memcached_create_context(
-                DOMAIN_STR, // maybe this should allways be localhost???
-                11211, // port
-                0,     // text_protocol
-                1,     // num_threads (so, 1 thread...)
-                "h2o:ssl-resumption:" // prefix
-            ),       
-            86400 // expiration, possible 1 day
-        );
-        h2o_socket_ssl_async_resumption_setup_ctx(accept_ctx.ssl_ctx);
-    }
+    // AFAIK memcached is kinda useless for 1 server
+    // if (USE_MEMCACHED) {
+    //     accept_ctx.libmemcached_receiver = &libmemcached_receiver;
+    //     h2o_accept_setup_memcached_ssl_resumption(
+    //         h2o_memcached_create_context(
+    //             DOMAIN_STR, // maybe this should always be localhost???
+    //             11211, // port
+    //             0,     // text_protocol
+    //             1,     // num_threads (so, 1 thread...)
+    //             "h2o:ssl-resumption:" // prefix
+    //         ),       
+    //         86400 // expiration, possible 1 day
+    //     );
+    //     h2o_socket_ssl_async_resumption_setup_ctx(accept_ctx.ssl_ctx);
+    // }
 
 #ifdef SSL_CTX_set_ecdh_auto
     SSL_CTX_set_ecdh_auto(accept_ctx.ssl_ctx, 1);
@@ -464,8 +422,126 @@ static int setup_ssl(const char* cert_file, const char* key_file, const char* ci
     return 0;
 }
 
+
+void process_html(const char* dir, const char* name, const char* new_name) {
+    assert(strlen(dir) + strlen(name) + 2 <= 256);
+    char cstr[256] = "";
+    strcpy(cstr, dir);
+    strcat(cstr, "/");
+    strcat(cstr, name);
+    FILE* file = fopen(cstr, "r");
+    if (!file) {
+        // file doesn't exist
+        puts(cstr);
+        perror("fopen r");
+        abort();
+    }
+    fseek(file, 0, SEEK_END);
+    int file_sz = ftell(file);
+    if (file_sz < 0) {
+        perror("ftell < 0");
+        fclose(file);
+        abort();
+    }
+    fseek(file, 0, SEEK_SET);
+    constexpr int buffer_size = 10000;
+    char buffer[buffer_size] = {};
+    int bytes_read = fread(buffer, 1, file_sz, file);
+    if (bytes_read != file_sz) {
+        perror("bytes_read != file_sz");
+        fclose(file);
+        abort();
+    }
+    buffer[bytes_read] = '\0';
+
+    const char marker_start[] = "<!-- #include("; // Yeah, if you add extra spaces this function will break
+    const char marker_end[] = ") -->";
+    const int len_start = strlen(marker_start);
+    const int len_end = strlen(marker_end);
+
+    char* str_start = strstr(buffer, marker_start);
+	char* str_end = strstr(buffer, marker_end);
+
+    while (str_start && str_end) {
+        char* part_after = strdup(str_end + len_end);
+
+        str_end[0] = '\0';
+        const char* PATH = str_start + len_start;
+        assert(strlen(dir) + strlen(PATH) + 2 <= 256);
+        char dstr[256] = "";
+        strcpy(dstr, dir);
+        strcat(dstr, "/");
+        strcat(dstr, PATH);
+        
+        FILE* f = fopen(dstr, "r");
+        if (!f) {
+            puts(dstr);
+            perror("fopen");
+            abort();
+        }
+        fseek(f, 0, SEEK_END);
+        int size = ftell(f);
+        bytes_read += size;
+        fseek(f, 0, SEEK_SET);
+
+        str_start[0] = '\0';
+        const int index = strlen(buffer);
+        memset(str_start, 0, file_sz - index);
+
+        fread(buffer + index, 1, size, f);
+        buffer[index + size] = '\0'; // should be unnecessary
+        strcat(buffer, part_after);
+
+        fclose(f);
+        char* after_start = strstr(part_after, marker_start);
+        char* after_end = strstr(part_after, marker_end);
+        if (!after_start || !after_end) {
+            free(part_after);
+            break;
+        }
+        str_start += after_start - part_after;
+        str_end   += after_end   - part_after;
+        free(part_after);
+    }
+
+    if (buffer_size < bytes_read) {
+        printf("buffersize: %d\nbytes_read: %ld\n", buffer_size, bytes_read);
+        puts("Make buffersize larger!");
+        fclose(file);
+        abort();
+    }
+    fclose(file);
+    memset(cstr, 0, 256);
+    strcpy(cstr, dir);
+    strcat(cstr, "/");
+    strcat(cstr, new_name);
+    FILE* saved_file = fopen(cstr, "w");
+    if (!saved_file) {
+        puts(cstr);
+        perror("fopen w");
+        abort();
+    }
+    fprintf(saved_file, buffer);
+    fclose(saved_file);
+}
+
+
+
+
+
+
+
+
+
+
+
+
 int main(int argc, char** argv)
 {
+
+    // changing files
+    process_html(".", "index_before_preprocessing.html", "index.html");
+
     h2o_hostconf_t* hostconf;
     h2o_access_log_filehandle_t* logfh = h2o_access_log_open_handle("/dev/stdout", NULL, H2O_LOGCONF_ESCAPE_APACHE);
     h2o_pathconf_t* pathconf;
@@ -496,20 +572,18 @@ int main(int argc, char** argv)
     pathconf = h2o_config_register_path(hostconf, "/", 0);
     {
         h2o_handler_t* handler = h2o_create_handler(pathconf, sizeof(*handler));
-        handler->on_req = index_handler;
+        handler->on_req = add_alt_svc_handler;
     }
+    const char* index_files[] = { "index.html", NULL };
+    h2o_file_register(pathconf, ".", index_files, NULL, 0);
     if (logfh != NULL)
         h2o_access_log_register(pathconf, logfh);
 
-#if H2O_USE_LIBUV
-    uv_loop_t loop;
-    uv_loop_init(&loop);
-    h2o_context_init(&ctx, &loop, &config);
-#else
+
     h2o_context_init(&ctx, h2o_evloop_create(), &config);
-#endif
-    if (USE_MEMCACHED)
-        h2o_multithread_register_receiver(ctx.queue, &libmemcached_receiver, h2o_memcached_receiver);
+
+    //if (USE_MEMCACHED)
+    //    h2o_multithread_register_receiver(ctx.queue, &libmemcached_receiver, h2o_memcached_receiver);
 
     if (USE_HTTPS && setup_ssl(CERTIFICATE_FILEPATH, PRIVATE_KEY_FILEPATH,
         "DEFAULT:!MD5:!DSS:!DES:!RC4:!RC2:!SEED:!IDEA:!NULL:!ADH:!EXP:!SRP:!PSK") != 0)
@@ -541,7 +615,7 @@ int main(int argc, char** argv)
 
     h2o_http3_server_init_context(
         &ctx, // "this" for h2o "object". C moment
-        &http3_ctx.super, // why is it called super? Did h2o implement an inheritance???
+        &http3_ctx.super, // inheritance in my favourite OOP language
         ctx.loop, 
         udp_sock,
         (h2o_socket_t*) NULL, // sock_alt_family
@@ -549,14 +623,14 @@ int main(int argc, char** argv)
         &next_cid, 
         on_http3_accept, 
         (h2o_quic_notify_connection_update_cb) NULL,
-        config.http3.use_gso // what is gso? Using regardless
+        config.http3.use_gso // Generic Segmentation Offload enabled
     );
     http3_ctx.accept_ctx = &http3_accept_ctx;
 
     printf("HTTP/3 listening on https://" DOMAIN_STR ":" HTTP3_PORT_STR " (UDP/QUIC)\n");
 
 
-    while (h2o_evloop_run(ctx.loop, INT32_MAX) == 0) // does this count ints and after INT_MAX it stops?
+    while (h2o_evloop_run(ctx.loop, INT32_MAX) == 0)
         ;
 
 Error:

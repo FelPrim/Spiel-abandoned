@@ -8,7 +8,7 @@ if (CMAKE_VERSION VERSION_GREATER 3.12)
   set_property(TARGET server PROPERTY CXX_STANDARD 26)
 endif()
 
-option(BUILD_LOCAL ON)
+option(BUILD_LOCAL OFF)
 if(BUILD_LOCAL)
     set(DEPS_DIR "${PROJECT_SOURCE_DIR}/include")
     target_compile_definitions(server PRIVATE LOCAL=1)
