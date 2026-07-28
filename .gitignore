@@ -1,5 +1,6 @@
 *.pem
 */build/
+build/
 out/
 include/
 include_server/

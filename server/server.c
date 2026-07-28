@@ -521,14 +521,9 @@ void process_html(const char* dir, const char* name, const char* new_name) {
         perror("fopen w");
         abort();
     }
-    fprintf(saved_file, buffer);
+    fprintf(saved_file, "%s", buffer);
     fclose(saved_file);
 }
-
-
-
-
-
 
 
 
